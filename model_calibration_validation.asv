@@ -1,0 +1,362 @@
+function model_calibration_validation(calibrating, validating_noisy_dist, validating_future_mean)
+
+    % Calibrating and Validating Model
+    % This function loads in the pre-processed climate data and selects
+    % hyperparameters that maximize the marginal log likelihood function
+
+    load('pr_6x6_grid.mat')
+    
+    %% Figure S2: Accuracy of methods, 
+    % 0. Maximize the marginal likelihood, with multi-task learning (sum over
+    % multiple models for each location.  Add a noise term analogous to 5.18
+    % from R and W.  Choose time period to maximize (up to 2020?)
+    
+    % Noise term: 
+    yrs_5yr = [1875:5:2275];
+    Nobs = 30; % Corresponds to yrs up to 2020
+    
+    modinds = [1:16];
+    
+    sig1_opts = [0:0.05:0.5];
+    sig2_opts = [1:1:6];
+    sig3_opts = [0.025:0.05:0.6];
+    
+    time_diff = abs([1:Nobs] - [1:Nobs]'); % for the length scale in Kernel
+    
+    if calibrating
+        for lon_ii = 1:180
+            for lat_ii = 1:88
+                
+                pryrly = log(squeeze(pr_6x6(lon_ii, lat_ii, :, :)));
+                ind = find(isinf(pryrly));
+                pryrly(ind) = NaN; 
+        
+                HistP = nanmean(pryrly(1:100,:),1); 
+                HistStdP = nanstd(pryrly(1:100,:),1); 
+        
+                for yy = 1:90
+                    FiveYr(yy,:) = squeeze(nanmean(pryrly(5*(yy-1)+1:5*yy,:),1) - HistP)./HistStdP;
+                end
+        
+                for yy = 1:451-50
+                    Smoothed_mean(yy,:) = squeeze(nanmean(pryrly(yy:yy+50,:),1) - HistP)./HistStdP; % 50-yr running mean change. 
+                end
+        
+                FiveYr_anoms = FiveYr(5:end-5,:) - Smoothed_mean(1:5:end,:); % Anomaly relative to the smoothed mean. 
+        
+                Marginal_Likelihood = zeros(length(sig1_opts), length(sig2_opts), length(sig3_opts)); 
+        
+                for mod_ii = 1:16
+                
+                    mod_indtmp = modinds; 
+                    % for each oos_gcm, construct priors using remaining GCMs
+                    mod_indtmp(mod_ii) = [];  
+        
+                    % noise in observations
+                    sigma_n = nanvar(FiveYr_anoms(1:20,mod_ii)); 
+        
+                    % out of sample GCM 
+                    oos_gcm = FiveYr(5:end-5, mod_ii); % exclude the 25 years on either end of 5-yr averages, due to smoothing 
+        
+                    tmp = Smoothed_mean(1:5:end, mod_indtmp);
+                    tmp = [tmp(1:Nobs,:); tmp];
+        
+                    % smooth covariance term in kernel function
+                    K_GCM = nancov(tmp');
+                    % prior mean
+                    mu_T = mean(tmp');
+        
+                    for ii = 1:length(sig1_opts)
+                        for jj = 1:length(sig2_opts)
+                            for kk = 1:length(sig3_opts)
+                                sigma1 = sig1_opts(ii); 
+                                sigma2 = sig2_opts(jj); 
+                                sigma3 = sig3_opts(kk); 
+                                
+                                % Noise kernel includes autocorrelated noise
+                                % and white noise term, eq 5.18 in R&W
+                                K_noise = sigma1^2 * exp(-(1/(2*sigma2^2))*(time_diff).^2) + sigma3^2*eye(Nobs);
+        
+                                Kernel = K_GCM(1:Nobs, 1:Nobs) + K_noise; 
+        
+                                y = oos_gcm(1:Nobs); 
+                                mX = mu_T(1:Nobs);
+                                Noise = sigma_n*eye(Nobs, Nobs);
+        
+                                K_o = Kernel(1:Nobs, 1:Nobs); 
+          
+                                tmp = -0.5*((y-mX')'*inv(K_o+Noise)*(y-mX') + log(det((K_o+Noise))));
+                                
+                                if isreal(tmp)
+                                    Marginal_Likelihood(ii,jj,kk) = tmp + Marginal_Likelihood(ii,jj,kk);
+                                else
+                                    Marginal_Likelihood(ii,jj,kk) = -inf; 
+                                end
+                            end
+                        end
+                    end
+                end
+                c = find (Marginal_Likelihood == max(max(max(Marginal_Likelihood))));
+                [a b d] = ind2sub(size(Marginal_Likelihood ),c);
+                Max_Likelihood_sigma1(lon_ii, lat_ii) = sig1_opts(a(1)); 
+                Max_Likelihood_sigma2(lon_ii, lat_ii) = sig2_opts(b(1)); 
+                Max_Likelihood_sigma3(lon_ii, lat_ii) = sig3_opts(d(1)); 
+            end
+            lon_ii
+        end
+        
+        save('LOOCV_test_hyperparameter_selectionfull_Nov2023_2.mat', 'Max_Likelihood_sigma1','Max_Likelihood_sigma2','Max_Likelihood_sigma3')
+
+    else
+        load('LOOCV_test_hyperparameter_selectionfull_Nov2023_2.mat')
+    end
+
+    if validating_noisy_dist
+        modinds = [1:16];
+        
+        tobs_vals = [2000:20:2080];
+        t_end = find(yrs_5yr == 2150);
+        
+        for lon_ii = 1:180
+            for lat_ii = 1:88
+            
+                sigma1 = Max_Likelihood_sigma1(lon_ii,lat_ii); 
+                sigma2 = Max_Likelihood_sigma2(lon_ii,lat_ii); 
+                sigma3 = Max_Likelihood_sigma3(lon_ii,lat_ii);
+            
+                pryrly = log(squeeze(pr_6x6(lon_ii, lat_ii, :, :)));
+                ind = find(isinf(pryrly));
+                pryrly(ind) = NaN; 
+            
+                histP = nanmean(pryrly(1:100,:),1); 
+                histStDevP = nanstd(pryrly(1:100,:),1); 
+            
+                for yy = 1:90
+                    FiveYr(yy,:) = squeeze(nanmean(pryrly(5*(yy-1)+1:5*yy,:),1)- histP)./histStDevP;
+                end
+            
+            
+                for yy = 1:451-50
+                    smoothedMA(yy,:) = squeeze(nanmean(pryrly(yy:yy+50,:),1)- histP)./histStDevP;
+                end
+            
+                FiveYr_anoms = FiveYr(5:end-5,:) - smoothedMA(1:5:end,:); 
+            
+                for mod_ii = 1:16
+            
+                    mod_indtmp = modinds; 
+            
+                    mod_indtmp(mod_ii) = [];
+            
+                    sigma_n = nanvar(FiveYr_anoms(1:20,mod_ii)); 
+            
+                    oos_gcm = squeeze(FiveYr(5:end-5, mod_ii)); 
+                   
+                    GCM_data = squeeze(smoothedMA(1:5:end, mod_indtmp));
+                    
+                    nobs = find(yrs_5yr == 2020);   
+            
+                    [prior_mu, prior_cov, post_mu, post_cov] = GPR_fun(oos_gcm, nobs, GCM_data, sigma1, sigma2, sigma3, sigma_n);
+            
+                    resids =  post_mu(nobs+1:end) - oos_gcm(nobs+1:end);
+        
+                    Resid_store(lon_ii,lat_ii,mod_ii) = mean(resids); 
+                    
+                    Predic_vs_obs_noise(lon_ii,lat_ii,mod_ii) = sigma3^2/sigma_n;
+        
+                        
+                    for ii = 1:5
+                        nobs = find(yrs_5yr == tobs_vals(ii));
+        
+                        [prior_mu, prior_cov, post_mu, post_cov] = GPR_fun(oos_gcm, nobs, GCM_data, sigma1, sigma2, sigma3, sigma_n);
+                       
+                        % covariance of noisy predictive distribution must
+                        % include sigma_n term 
+                        Cov_term = post_cov + sigma_n*eye(length(yrs_5yr),length(yrs_5yr));
+                        
+                        % 95% CI
+                        upperLimit = post_mu(nobs+1:t_end) + 1.96*diag(Cov_term(nobs+1:t_end ,nobs+1:t_end).^(0.5)); 
+                        lowerLimit = post_mu(nobs+1:t_end) - 1.96*diag(Cov_term(nobs+1:t_end ,nobs+1:t_end).^(0.5)); 
+         
+                        ind = oos_gcm(nobs+1:t_end) < upperLimit & oos_gcm(nobs+1:t_end) > lowerLimit;
+        
+                        InRange_95pCI(lon_ii,lat_ii,mod_ii,ii) = sum(ind)/length(upperLimit); 
+        
+                        % 68% CI
+                        upperLimit = post_mu(nobs+1:t_end) + diag(Cov_term(nobs+1:t_end,nobs+1:t_end).^(0.5)); 
+                        lowerLimit = post_mu(nobs+1:t_end) - diag(Cov_term(nobs+1:t_end,nobs+1:t_end).^(0.5)); 
+         
+                        ind = oos_gcm(nobs+1:t_end) < upperLimit & oos_gcm(nobs+1:t_end) > lowerLimit;
+        
+                        InRange_68pCI(lon_ii,lat_ii,mod_ii,ii) = sum(ind)/length(upperLimit);  
+                    end
+        
+                end
+            end
+            lon_ii
+        end
+        
+        tmp = Resid_store(1:3:end, 1:3:end, :); 
+        tmp2 = reshape(tmp,size(tmp,1)*size(tmp,2)*size(tmp,3),1);
+        figure; hist(tmp2, 100)
+
+        MMMInRange_68pCI = squeeze(mean(InRange_68pCI,3));
+        MMMInRange_95pCI = squeeze(mean(InRange_95pCI,3));
+        
+        Col1 = squeeze(nanmean(nanmean(MMMInRange_68pCI,1),2));
+        Col2 = squeeze(nanmean(nanmean(MMMInRange_95pCI,1),2));
+        
+        tmp = cat(2, MMMInRange_68pCI(:,77:88,:), MMMInRange_68pCI(:,1:11,:)); 
+        Polar1 = squeeze(nanmean(nanmean(tmp,1),2));
+        
+        tmp = cat(2, MMMInRange_95pCI(:,77:88,:), MMMInRange_95pCI(:,1:11,:)); 
+        Polar2 = squeeze(nanmean(nanmean(tmp,1),2));
+        
+        Tropics1 = squeeze(nanmean(nanmean(MMMInRange_68pCI(:,32:56,:),1),2));
+        Tropics2 = squeeze(nanmean(nanmean(MMMInRange_95pCI(:,32:56,:),1),2));
+        
+        VarNames = {'CI68% Uncertain Polar Regions', 'CI95% Uncertain Polar Regions'};
+        RowNames = {'Obs to 2000', 'Obs to 2020','Obs to 2040', 'Obs to 2060','Obs to 2080'};
+        T = table(Polar1,Polar2,'VariableNames',VarNames,'RowNames',RowNames)
+        
+        VarNames = {'CI68% Uncertain Tropics Regions', 'CI95% Uncertain Tropics Regions'};
+        RowNames = {'Obs to 2000', 'Obs to 2020','Obs to 2040', 'Obs to 2060','Obs to 2080'};
+        T = table(Tropics1,Tropics2,'VariableNames',VarNames,'RowNames',RowNames)
+        
+        
+        VarNames = {'CI68% Uncertain Regions', 'CI95% Uncertain Regions'};
+        RowNames = {'Obs to 2000', 'Obs to 2020','Obs to 2040', 'Obs to 2060','Obs to 2080'};
+        T = table(Col1,Col2,'VariableNames',VarNames,'RowNames',RowNames)
+    
+
+    end
+
+    if validating_future_mean
+           
+        modinds = [1:16];
+        
+        tobs_vals = [2020, 2050];
+        t_end = find(yrs_5yr == 2150);
+
+        % Validating that 2150 mean is within the 68% (95%) CI 68% (95%) of the time.
+        
+        for lon_ii = 1:180
+            for lat_ii = 1:88
+            
+                sigma1 = Max_Likelihood_sigma1(lon_ii,lat_ii); 
+                sigma2 = Max_Likelihood_sigma2(lon_ii,lat_ii); 
+                sigma3 = Max_Likelihood_sigma3(lon_ii,lat_ii);
+            
+                pryrly = log(squeeze(pr_6x6(lon_ii, lat_ii, :, :)));
+                ind = find(isinf(pryrly));
+                pryrly(ind) = NaN; 
+            
+                histP = nanmean(pryrly(1:100,:),1); 
+                histStDevP = nanstd(pryrly(1:100,:),1); 
+            
+                for yy = 1:90
+                    FiveYr(yy,:) = squeeze(nanmean(pryrly(5*(yy-1)+1:5*yy,:),1)- histP)./histStDevP;
+                end
+            
+            
+                for yy = 1:451-50
+                    smoothedMA(yy,:) = squeeze(nanmean(pryrly(yy:yy+50,:),1)- histP)./histStDevP;
+                end
+            
+                FiveYr_anoms = FiveYr(5:end-5,:) - smoothedMA(1:5:end,:); 
+            
+                for mod_ii = 1:16
+            
+                    mod_indtmp = modinds; 
+            
+                    mod_indtmp(mod_ii) = [];
+            
+                    sigma_n = nanvar(FiveYr_anoms(1:20,mod_ii)); 
+            
+                    oos_gcm = squeeze(FiveYr(5:end-5, mod_ii)); 
+                   
+                    GCM_data = squeeze(smoothedMA(1:5:end, mod_indtmp));
+                    
+                    % identifying if 2150 is significantly different at
+                    % t_obs = 2150
+                    nobs = find(yrs_5yr == t_end);
+
+                    [prior_mu, prior_cov, post_mu, post_cov] = GPR_fun(oos_gcm, nobs, GCM_data, sigma1, sigma2, sigma3, sigma_n);
+                       
+                    % covariance of noise free future 
+                    Cov_term = post_cov;
+                    
+                    % 95% CI-sigma
+                    upperLimit = post_mu(t_end) + 1.96*diag(post_cov(t_end, t_end).^(0.5)); 
+                    lowerLimit = post_mu(t_end) - 1.96*diag(post_cov(t_end, t_end).^(0.5)); 
+
+                    % if the CI does not span zero then their product will
+                    % be positive
+                    if upperLimit*lowerLimit > 0 
+                        condition_sig = 1; 
+                        wet_dry = sign(upperLimit); 
+                    else
+                        condition_sig = 0; 
+                        wet_dry = 0;
+                    end
+                    
+                    for ii = 1:2
+                        nobs = find(yrs_5yr == tobs_vals(ii));
+            
+                        [prior_mu, prior_cov, post_mu, post_cov] = GPR_fun(oos_gcm, nobs, GCM_data, sigma1, sigma2, sigma3, sigma_n);
+                             
+                        % 95% CI
+                        upperLimit = post_mu(t_end) + 1.96*diag(post_cov(t_end, t_end).^(0.5)); 
+                        lowerLimit = post_mu(t_end) - 1.96*diag(post_cov(t_end, t_end).^(0.5)); 
+                        
+                        identify_correct_change(lon_ii,lat_ii, mod_ii, ii) = 0;
+                        
+                        if upperLimit*lowerLimit > 0 && condition_sig == 1
+                            if wet_dry == sign(upperLimit)
+                                identify_correct_change(lon_ii,lat_ii, mod_ii, 1) = 1; 
+                            end
+                        elseif upperLimit*lowerLimit < 0 && condition_sig == 0
+                            identify_correct_change(lon_ii,lat_ii, mod_ii, ii) = 1; 
+                        end
+                    end
+                                                         
+                end
+        
+            end
+           
+            lon_ii
+        end
+        
+
+
+        MMMInRange_95pCI = squeeze(mean(identify_correct_change,3));
+        nanmean(MMMInRange_95pCI,1)
+        Col2 = squeeze(nanmean(nanmean(MMMInRange_95pCI,1),2));
+        
+        tmp = cat(2, MMMInRange_68pCI(:,77:88,:), MMMInRange_68pCI(:,1:11,:)); 
+        Polar1 = squeeze(nanmean(nanmean(tmp,1),2));
+        
+        tmp = cat(2, MMMInRange_95pCI(:,77:88,:), MMMInRange_95pCI(:,1:11,:)); 
+        Polar2 = squeeze(nanmean(nanmean(tmp,1),2));
+        
+        Tropics1 = squeeze(nanmean(nanmean(MMMInRange_68pCI(:,32:56,:),1),2));
+        Tropics2 = squeeze(nanmean(nanmean(MMMInRange_95pCI(:,32:56,:),1),2));
+        
+        VarNames = {'CI68% noise-free Polar Regions', 'CI95% noise-free Polar Regions'};
+        RowNames = {'Obs to 2000', 'Obs to 2020','Obs to 2040', 'Obs to 2060','Obs to 2080'};
+        T = table(Polar1,Polar2,'VariableNames',VarNames,'RowNames',RowNames)
+        
+        VarNames = {'CI68% noise-free Tropics Regions', 'CI95% noise-free Tropics Regions'};
+        RowNames = {'Obs to 2000', 'Obs to 2020','Obs to 2040', 'Obs to 2060','Obs to 2080'};
+        T = table(Tropics1,Tropics2,'VariableNames',VarNames,'RowNames',RowNames)
+        
+        
+        VarNames = {'CI68% noise-free Regions', 'CI95% noise-free Regions'};
+        RowNames = {'Obs to 2000', 'Obs to 2020','Obs to 2040', 'Obs to 2060','Obs to 2080'};
+        T = table(Col1,Col2,'VariableNames',VarNames,'RowNames',RowNames)
+    
+    end
+
+
+
+end
